@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"database/sql/driver"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/gchaincl/sqlhooks"
@@ -22,7 +23,10 @@ var (
 	databaseQueryHistogram prometheus.Histogram
 )
 
-func init() {
+// WrapDatabaseDriverWithHooks creates a fake database driver that
+// executes pre and post functions which we use to gather metrics about
+// database queries. It also registers the metrics.
+func WrapDatabaseDriverWithHooks(dbType string) string {
 	databaseQueryCounter = prometheus.NewCounterVec(prometheus.CounterOpts{
 		Namespace: "grafana",
 		Name:      "database_queries_total",
@@ -37,12 +41,7 @@ func init() {
 	})
 
 	prometheus.MustRegister(databaseQueryCounter, databaseQueryHistogram)
-}
 
-// WrapDatabaseDriverWithHooks creates a fake database driver that
-// executes pre and post functions which we use to gather metrics about
-// database queries.
-func WrapDatabaseDriverWithHooks(dbType string) string {
 	drivers := map[string]driver.Driver{
 		migrator.SQLite:   &sqlite3.SQLiteDriver{},
 		migrator.MySQL:    &mysql.MySQLDriver{},
@@ -56,7 +55,7 @@ func WrapDatabaseDriverWithHooks(dbType string) string {
 
 	driverWithHooks := dbType + "WithHooks"
 	sql.Register(driverWithHooks, sqlhooks.Wrap(d, &databaseQueryWrapper{log: log.New("sqlstore.metrics")}))
-	core.RegisterDriver(driverWithHooks, &databaseQueryWrapperParser{dbType: dbType})
+	core.RegisterDriver(driverWithHooks, &databaseQueryWrapperDriver{dbType: dbType})
 	return driverWithHooks
 }
 
@@ -100,12 +99,15 @@ func (h *databaseQueryWrapper) OnError(ctx context.Context, err error, query str
 	return err
 }
 
-type databaseQueryWrapperParser struct {
+// databaseQueryWrapperDriver satisfies the xorm.io/core.Driver interface
+type databaseQueryWrapperDriver struct {
 	dbType string
 }
 
-func (hp *databaseQueryWrapperParser) Parse(string, string) (*core.Uri, error) {
-	return &core.Uri{
-		DbType: core.DbType(hp.dbType),
-	}, nil
+func (hp *databaseQueryWrapperDriver) Parse(driverName, dataSourceName string) (*core.Uri, error) {
+	driver := core.QueryDriver(hp.dbType)
+	if driver == nil {
+		return nil, fmt.Errorf("could not find driver with name %s", hp.dbType)
+	}
+	return core.QueryDriver(hp.dbType).Parse(driverName, dataSourceName)
 }
